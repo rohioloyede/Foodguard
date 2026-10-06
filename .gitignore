@@ -1,0 +1,102 @@
+# ============ Logs ============
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ============ Node ============
+node_modules
+dist
+dist-ssr
+*.local
+
+# ============ Environment / Secrets ============
+.env
+.env.*
+!.env.example
+backend/.env
+*.secret
+secrets.json
+credentials.json
+service-account*.json
+*.tfstate
+*.tfstate.*
+
+# ============ Signing keys & certificates ============
+*.keystore
+*.jks
+*.p12
+*.p8
+*.mobileprovision
+*.pem
+*.key
+*.certSigningRequest
+*.cer
+*.ipa
+*.aab
+*.apk
+
+# ============ Python ============
+backend/.venv/
+venv/
+.venv/
+__pycache__/
+backend/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+backend/.pytest_cache/
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+*.installed.cfg
+*.egg
+
+# ============ Android ============
+android/.gradle/
+android/local.properties
+android/**/build/
+android/app/release/
+android/app/debug/
+android/.idea/
+android/captures/
+android/app/google-services.json
+
+# ============ iOS ============
+ios/App/Pods/
+ios/DerivedData/
+ios/App/App.xcworkspace/xcuserdata/
+ios/App/App.xcodeproj/xcuserdata/
+ios/App/App.xcodeproj/project.xcworkspace/xcuserdata/
+ios/App/build/
+ios/App/App/public/
+ios/App/App/GoogleService-Info.plist
+*.dSYM.zip
+*.dSYM
+
+# ============ Capacitor generated assets ============
+android/app/src/main/assets/public/
+
+# ============ Docker ============
+.dockerignore
+!backend/.dockerignore
+docker-compose.override.yml
+
+# ============ Editor directories and files ============
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
