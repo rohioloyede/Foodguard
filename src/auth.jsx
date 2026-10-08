@@ -4,9 +4,13 @@ import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from './auth-context.js'
 import { supabase } from './lib/supabase.js'
 
-const getAuthRedirectUrl = () => Capacitor.isNativePlatform()
-	? 'foodguard://login'
-	: new URL('/login', import.meta.env.VITE_SITE_URL || window.location.origin).toString()
+const getAuthRedirectUrl = (forConsumer = false) => {
+	const redirectUrl = Capacitor.isNativePlatform()
+		? new URL('foodguard://login')
+		: new URL('/login', import.meta.env.VITE_SITE_URL || window.location.origin)
+	if (forConsumer) redirectUrl.searchParams.set('audience', 'consumer')
+	return redirectUrl.toString()
+}
 
 export function RequireAuth({ children }) {
 	const { session, loading } = useAuth()
@@ -66,6 +70,9 @@ export function AuthPage() {
 	const { session, authEvent } = useAuth()
 	const isSignUp = location.pathname === '/signup'
 	const isPasswordRecovery = authEvent === 'PASSWORD_RECOVERY'
+	const audience = new URLSearchParams(location.search).get('audience')
+	const isConsumerFlow = audience === 'consumer'
+	const destination = location.state?.from?.pathname || (isConsumerFlow ? '/consumer/dashboard' : '/dashboard')
 	const navigate = useNavigate()
 	const [email, setEmail] = useState('')
 	const [password, setPassword] = useState('')
@@ -77,9 +84,9 @@ export function AuthPage() {
 
 	useEffect(() => {
 		if (session && !isPasswordRecovery) {
-			navigate(location.state?.from?.pathname || '/dashboard', { replace: true })
+			navigate(destination, { replace: true })
 		}
-	}, [isPasswordRecovery, location.state?.from?.pathname, navigate, session])
+	}, [destination, isPasswordRecovery, navigate, session])
 
 	async function handleSubmit(event) {
 		event.preventDefault()
@@ -96,17 +103,20 @@ export function AuthPage() {
 			if (isPasswordRecovery) {
 				const { error: authError } = await supabase.auth.updateUser({ password })
 				if (authError) throw authError
-				navigate('/dashboard', { replace: true })
+				navigate(destination, { replace: true })
 			} else if (isSignUp) {
 				const { data, error: authError } = await supabase.auth.signUp({
 					email: email.trim(),
 					password,
-					options: { emailRedirectTo: getAuthRedirectUrl() },
+					options: {
+						emailRedirectTo: getAuthRedirectUrl(isConsumerFlow),
+						data: { account_type: isConsumerFlow ? 'consumer' : 'platform' },
+					},
 				})
 				if (authError) throw authError
 
 				if (data.session) {
-					navigate(location.state?.from?.pathname || '/dashboard', { replace: true })
+					navigate(destination, { replace: true })
 				} else {
 					setConfirmationPending(true)
 					setNotice('Check your email for a confirmation link to finish creating your account.')
@@ -117,7 +127,7 @@ export function AuthPage() {
 					password,
 				})
 				if (authError) throw authError
-				navigate(location.state?.from?.pathname || '/dashboard', { replace: true })
+				navigate(destination, { replace: true })
 			}
 		} catch (authError) {
 			const message = authError.message || 'Something went wrong. Please try again.'
@@ -144,7 +154,7 @@ export function AuthPage() {
 			const { error: authError } = await supabase.auth.resend({
 				type: 'signup',
 				email: email.trim(),
-				options: { emailRedirectTo: getAuthRedirectUrl() },
+				options: { emailRedirectTo: getAuthRedirectUrl(isConsumerFlow) },
 			})
 			if (authError) throw authError
 			setNotice('If this address has an unconfirmed account, a new confirmation link is on its way. Check your inbox and spam folder.')
@@ -175,7 +185,7 @@ export function AuthPage() {
 		setBusy(true)
 		try {
 			const { error: authError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-				redirectTo: getAuthRedirectUrl(),
+				redirectTo: getAuthRedirectUrl(isConsumerFlow),
 			})
 			if (authError) throw authError
 			setNotice('If an account exists for that address, a password reset link is on its way.')
@@ -184,6 +194,28 @@ export function AuthPage() {
 		} finally {
 			setBusy(false)
 		}
+	}
+
+	if (!session && !audience && !isPasswordRecovery) {
+		return (
+			<section className="consumer-entry-page">
+				<div className="consumer-entry-card">
+					<p className="eyebrow eyebrow-dark">FoodGuard</p>
+					<h1>Are you a Consumer?</h1>
+					<div className="consumer-entry-actions">
+						<Link
+							className="button button-primary consumer-entry-button"
+							to={`${location.pathname}?audience=consumer`}
+						>
+							Continue as a Consumer <span aria-hidden="true">↗</span>
+						</Link>
+						<Link className="consumer-entry-platform-link" to={`${location.pathname}?audience=platform`}>
+							Continue to the FoodGuard platform
+						</Link>
+					</div>
+				</div>
+			</section>
+		)
 	}
 
 	return (
@@ -200,12 +232,16 @@ export function AuthPage() {
 			<div className="auth-panel">
 				<div className="auth-form-wrap">
 					<p className="eyebrow eyebrow-dark">
-						{isPasswordRecovery ? 'Password reset' : isSignUp ? 'Create your account' : 'Welcome back'}
+						{isPasswordRecovery ? 'Password reset' : isConsumerFlow ? 'Consumer access' : isSignUp ? 'Create your account' : 'Welcome back'}
 					</p>
-					<h2>{isPasswordRecovery ? 'Choose a new password' : isSignUp ? 'Join FoodGuard' : 'Sign in'}</h2>
+					<h2>{isPasswordRecovery ? 'Choose a new password' : isConsumerFlow && !isSignUp ? 'Consumer sign in' : isSignUp ? 'Join FoodGuard' : 'Sign in'}</h2>
 					<p className="auth-description">
 						{isPasswordRecovery
 							? 'Enter a new password for your FoodGuard account.'
+							: isConsumerFlow
+								? isSignUp
+									? 'Create a consumer account to check food and access safety information.'
+									: 'Sign in to continue to your Consumer page.'
 							: isSignUp
 								? 'Create an account to continue to the FoodGuard platform.'
 								: 'Sign in to continue to the FoodGuard platform.'}
@@ -272,7 +308,12 @@ export function AuthPage() {
 					</form>
 					{!isPasswordRecovery && <p className="auth-switch">
 						{isSignUp ? 'Already have an account?' : 'New to FoodGuard?'}{' '}
-						<Link to={isSignUp ? '/login' : '/signup'}>{isSignUp ? 'Sign in' : 'Create an account'}</Link>
+						<Link
+							state={location.state}
+							to={`${isSignUp ? '/login' : '/signup'}${audience ? `?audience=${audience}` : ''}`}
+						>
+							{isSignUp ? 'Sign in' : 'Create an account'}
+						</Link>
 					</p>}
 				</div>
 			</div>

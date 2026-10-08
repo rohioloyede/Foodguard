@@ -56,7 +56,9 @@ export function AuthProvider({ children }) {
 
 				if (authType === 'recovery') setAuthEvent('PASSWORD_RECOVERY')
 				setAuthCallbackError('')
-				navigate('/login', { replace: true })
+				navigate(callbackUrl.searchParams.get('audience') === 'consumer'
+					? '/login?audience=consumer'
+					: '/login', { replace: true })
 			} catch (error) {
 				setAuthCallbackError(error.message || 'Could not complete the email link. Please open FoodGuard and sign in again.')
 				navigate('/login', { replace: true })

@@ -4,12 +4,14 @@ import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from
 import { ApproachesPage, DigitalPassportPage, HomePage, NotFoundPage, ProblemPage, ReferenceDatabasePage, TargetFoodCategoriesPage } from './pages.jsx'
 import { AccountPage, AuthPage, RequireAuth } from './auth.jsx'
 import { DashboardPage } from './dashboard.jsx'
+import { ConsumerPage } from './consumer.jsx'
 import { useAuth } from './auth-context.js'
 import { supabase } from './lib/supabase.js'
 
 function App() {
 	const location = useLocation()
 	const isAuthRoute = ['/login', '/signup'].includes(location.pathname)
+	const isConsumerRoute = location.pathname.startsWith('/consumer')
 	const { session, loading, authEvent, authCallbackError, clearAuthCallbackError } = useAuth()
 	const isPasswordRecovery = authEvent === 'PASSWORD_RECOVERY'
 	const navigate = useNavigate()
@@ -43,7 +45,7 @@ function App() {
 		<main className={session && !isPasswordRecovery ? 'dashboard-shell' : isAuthRoute ? 'auth-shell' : undefined}>
 			{session && !isPasswordRecovery ? (
 				<header className="dashboard-header">
-					<Link className="brand" to="/dashboard" aria-label="FoodGuard dashboard">
+					<Link className="brand" to={isConsumerRoute ? '/consumer/dashboard' : '/dashboard'} aria-label="FoodGuard dashboard">
 						<span className="brand-mark" aria-hidden="true">F</span>
 						<span>FoodGuard <b>AI Nigeria</b></span>
 					</Link>
@@ -73,9 +75,21 @@ function App() {
 
 			{session && !isPasswordRecovery ? <Routes>
 				<Route path="/dashboard" element={<DashboardPage />} />
-				<Route path="*" element={<Navigate to="/dashboard" replace />} />
+				<Route path="/consumer" element={<ConsumerPage />} />
+				<Route path="/consumer/dashboard" element={<ConsumerPage />} />
+				<Route path="/consumer/report" element={<ConsumerPage />} />
+				<Route path="/consumer/safety" element={<ConsumerPage />} />
+				<Route path="/consumer/scan" element={<Navigate to="/consumer/dashboard" replace />} />
+				<Route path="/login" element={<AuthPage />} />
+				<Route path="/signup" element={<AuthPage />} />
+				<Route path="*" element={<Navigate to={isConsumerRoute ? '/consumer/dashboard' : '/dashboard'} replace />} />
 			</Routes> : session ? <AuthPage /> : <Routes>
 				<Route path="/" element={<HomePage />} />
+				<Route path="/consumer" element={<ConsumerPage />} />
+				<Route path="/consumer/dashboard" element={<Navigate to="/login?audience=consumer" replace />} />
+				<Route path="/consumer/report" element={<Navigate to="/login?audience=consumer" replace state={{ from: { pathname: '/consumer/report' } }} />} />
+				<Route path="/consumer/safety" element={<ConsumerPage />} />
+				<Route path="/consumer/scan" element={<Navigate to="/login?audience=consumer" replace />} />
 				<Route path="/problem" element={<ProblemPage />} />
 				<Route path="/why-existing-approaches" element={<ApproachesPage />} />
 				<Route path="/reference-database" element={<ReferenceDatabasePage />} />

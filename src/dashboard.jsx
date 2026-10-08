@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAuth } from './auth-context.js'
 import { foodCatalog } from './food-catalog.js'
+import { supabase } from './lib/supabase.js'
 
 const steps = [
 	{ title: 'Select food', description: 'Choose the food category and item you want to screen.' },
 	{ title: 'Scan', description: 'Take or upload a clear photo of the sample.' },
-	{ title: 'Test', description: 'Add a reading from a connected screening device, if available.' },
+	{ title: 'Test', description: 'Record a reading from your screening device, if available.' },
 	{ title: 'Analyse', description: 'Compare evidence with validated reference data.' },
 	{ title: 'Verify', description: 'Refer high-risk or uncertain samples for laboratory confirmation.' },
 	{ title: 'Act', description: 'Use verified findings to decide what to do next.' },
@@ -25,11 +26,11 @@ const foodOptionColors = [
 const maxPhotoSize = 10 * 1024 * 1024
 const maxAnalysisImageSize = 4 * 1024 * 1024
 
-export function DashboardPage() {
+export function DashboardPage({ consumerMode = false, embedded = false, onScan, onResult, onReport, onSafety }) {
 	const { session } = useAuth()
-	const [step, setStep] = useState(0)
-	const [category, setCategory] = useState('')
-	const [foodName, setFoodName] = useState('')
+	const [step, setStep] = useState(consumerMode ? 1 : 0)
+	const [category, setCategory] = useState(consumerMode ? 'Unspecified' : '')
+	const [foodName, setFoodName] = useState(consumerMode ? 'Unspecified food sample' : '')
 	const [foodSearch, setFoodSearch] = useState('')
 	const [photo, setPhoto] = useState(null)
 	const [photoUrl, setPhotoUrl] = useState('')
@@ -41,6 +42,9 @@ export function DashboardPage() {
 	const [analysis, setAnalysis] = useState(null)
 	const [analysisError, setAnalysisError] = useState('')
 	const [analysing, setAnalysing] = useState(false)
+	const [savingScreening, setSavingScreening] = useState(false)
+	const [screeningSaved, setScreeningSaved] = useState(false)
+	const [screeningSaveError, setScreeningSaveError] = useState('')
 	const videoRef = useRef(null)
 
 	useEffect(() => {
@@ -48,6 +52,11 @@ export function DashboardPage() {
 			if (photoUrl) URL.revokeObjectURL(photoUrl)
 		}
 	}, [photoUrl])
+
+	function invalidateSavedScreening() {
+		setScreeningSaved(false)
+		setScreeningSaveError('')
+	}
 
 	useEffect(() => {
 		if (!cameraActive) return undefined
@@ -106,6 +115,7 @@ export function DashboardPage() {
 		setCameraActive(false)
 		setAnalysis(null)
 		setTestCompleted(false)
+		invalidateSavedScreening()
 	}
 
 	function handleTakeSnapshot() {
@@ -146,13 +156,14 @@ export function DashboardPage() {
 			setTestCompleted(false)
 			setCameraActive(false)
 			setCameraBusy(false)
+			invalidateSavedScreening()
 		}, 'image/jpeg', 0.9)
 	}
 
 	async function getAnalysisImageDataUrl(file) {
 		const bitmap = await createImageBitmap(file)
 		try {
-			const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height))
+			const scale = Math.min(1, 1280 / Math.max(bitmap.width, bitmap.height))
 			const canvas = document.createElement('canvas')
 			canvas.width = Math.max(1, Math.round(bitmap.width * scale))
 			canvas.height = Math.max(1, Math.round(bitmap.height * scale))
@@ -188,9 +199,10 @@ export function DashboardPage() {
 			setAnalysisError('Your session has expired. Sign in again before requesting a visual review.')
 			return
 		}
-		const analysisApiUrl = import.meta.env.VITE_FOOD_ANALYSIS_API_URL
-		if (!analysisApiUrl) {
-			setAnalysisError('The visual analysis service is not configured yet. Contact the site administrator.')
+		const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+		const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+		if (!supabaseUrl || !supabaseAnonKey) {
+			setAnalysisError('FoodGuard is not connected to Supabase. Contact the site administrator.')
 			return
 		}
 		if (!photo) {
@@ -201,18 +213,26 @@ export function DashboardPage() {
 		setAnalysing(true)
 		try {
 			const image = await getAnalysisImageDataUrl(photo)
-			const response = await fetch(`${analysisApiUrl.replace(/\/+$/, '')}/v1/analyze-food-image`, {
+			const response = await fetch(`${supabaseUrl.replace(/\/+$/, '')}/functions/v1/analyze-food-image`, {
 				method: 'POST',
 				headers: {
+					apikey: supabaseAnonKey,
 					Authorization: `Bearer ${session.access_token}`,
 					'Content-Type': 'application/json',
 				},
-				body: JSON.stringify({ image, category, foodName }),
+				body: JSON.stringify({ image, category: consumerMode ? 'Unspecified' : category, foodName }),
 			})
 			const data = await response.json().catch(() => null)
 			if (!response.ok) {
-				throw new Error(data?.detail || 'The visual review could not be completed.')
+				throw new Error(data?.error || data?.detail || 'The visual review could not be completed.')
 			}
+			const validRiskAreas = Array.isArray(data?.riskAreas) &&
+				data.riskAreas.every((area) => area &&
+					Number.isInteger(area.x) && area.x >= 0 && area.x <= 1000 &&
+					Number.isInteger(area.y) && area.y >= 0 && area.y <= 1000 &&
+					Number.isInteger(area.width) && area.width > 0 && area.width <= 1000 - area.x &&
+					Number.isInteger(area.height) && area.height > 0 && area.height <= 1000 - area.y &&
+					typeof area.observation === 'string')
 			if (!data || !['no_obvious_visual_issue', 'possible_visual_issue', 'unclear'].includes(data.visibleCondition) ||
 				!Array.isArray(data.observations) ||
 				!data.observations.every((item) => typeof item === 'string') ||
@@ -220,11 +240,43 @@ export function DashboardPage() {
 				typeof data.disclaimer !== 'string') {
 				throw new Error('The visual review returned an unexpected response. Please try again.')
 			}
+			if (consumerMode && !validRiskAreas) {
+				throw new Error('The AI scan service needs an update to identify photo areas. Please try again later.')
+			}
 			setAnalysis(data)
+			invalidateSavedScreening()
+			if (consumerMode) setStep(3)
 		} catch (error) {
 			setAnalysisError(error.message || 'The visual review could not be completed. Please try again.')
 		} finally {
 			setAnalysing(false)
+		}
+	}
+
+	async function handleSaveScreening() {
+		setScreeningSaveError('')
+		if (screeningSaved) return
+		if (!supabase || !session?.user?.id) {
+			setScreeningSaveError('FoodGuard is not connected to Supabase. Contact the site administrator.')
+			return
+		}
+
+		setSavingScreening(true)
+		try {
+			const { error } = await supabase.from('food_screenings').insert({
+				user_id: session.user.id,
+				food_category: category,
+				food_name: foodName.trim(),
+				device_reading: deviceReading.trim() || null,
+				visible_condition: analysis?.visibleCondition ?? null,
+				observations: analysis?.observations ?? [],
+			})
+			if (error) throw error
+			setScreeningSaved(true)
+		} catch (error) {
+			setScreeningSaveError(error.message || 'Could not save this screening. Please try again.')
+		} finally {
+			setSavingScreening(false)
 		}
 	}
 
@@ -237,16 +289,87 @@ export function DashboardPage() {
 	}
 
 	return (
-		<section className="dashboard-page">
-			<header className="dashboard-welcome">
+		<section className={`dashboard-page${embedded ? ' consumer-scan-embedded' : ''}`}>
+			{!embedded && <header className="dashboard-welcome">
 				<div>
-					<p className="eyebrow eyebrow-dark">FoodGuard screening workspace</p>
-					<h1>Your food safety dashboard</h1>
-					<p className="dashboard-intro">Hello, {session.user.email}. Start a guided screening workflow for a food sample.</p>
+					<p className="eyebrow eyebrow-dark">{consumerMode ? 'Consumer food checker' : 'FoodGuard screening workspace'}</p>
+					<h1>{consumerMode ? 'Check Before You Buy.' : 'Your food safety dashboard'}</h1>
+					<p className="dashboard-intro">{consumerMode
+						? 'Scan a food sample and review a preliminary AI observation. This screening cannot determine whether food is safe.'
+						: `Hello, ${session.user.email}. Start a guided screening workflow for a food sample.`}</p>
 				</div>
-			</header>
+			</header>}
 
-			<nav className="screening-steps" aria-label="Food screening steps">
+			{consumerMode && (
+				<nav className="screening-steps consumer-feature-nav" aria-label="Consumer dashboard features">
+					<button
+						aria-current={step === 1 ? 'page' : undefined}
+						className={`screening-step${step === 1 ? ' is-active' : ''}`}
+						onClick={() => {
+							setStep(1)
+							setAnalysisError('')
+							setPhotoError('')
+							onScan?.()
+						}}
+						type="button"
+					>
+						<span className="screening-step-number">01</span>
+						<span className="screening-step-title">Select food</span>
+					</button>
+					<button
+						aria-current={step === 2 ? 'page' : undefined}
+						className={`screening-step${step === 2 ? ' is-active' : ''}`}
+						onClick={() => {
+							if (!photo) {
+								setPhotoError('Select a food photo before starting an AI scan.')
+								setStep(1)
+								onScan?.()
+								return
+							}
+							setAnalysisError('')
+							setStep(2)
+						}}
+						type="button"
+					>
+						<span className="screening-step-number">02</span>
+						<span className="screening-step-title">AI scan</span>
+					</button>
+					<button
+						aria-current={step === 3 ? 'page' : undefined}
+						className={`screening-step${step === 3 ? ' is-active' : ''}`}
+						onClick={() => {
+							if (!photo) {
+								setPhotoError('Select a food photo before viewing its AI result.')
+								setStep(1)
+								onScan?.()
+								return
+							}
+							if (!analysis) {
+								setAnalysisError('Run an AI scan first to view the result.')
+								setStep(2)
+								return
+							}
+							setAnalysisError('')
+							setStep(3)
+							onResult?.()
+						}}
+						type="button"
+					>
+						<span className="screening-step-number">03</span>
+						<span className="screening-step-title">View result</span>
+					</button>
+					<button className="screening-step" onClick={onReport} type="button">
+						<span className="screening-step-number">04</span>
+						<span className="screening-step-title">Report suspicious products</span>
+					</button>
+					<button className="screening-step" onClick={onSafety} type="button">
+						<span className="screening-step-number">05</span>
+						<span className="screening-step-title">Access food-safety information</span>
+					</button>
+				</nav>
+			)}
+
+			{!consumerMode && <nav className="screening-steps" aria-label="Food screening steps">
 				{steps.map((item, index) => (
 					<button
 						aria-current={step === index ? 'step' : undefined}
@@ -263,13 +386,21 @@ export function DashboardPage() {
 						<span className="screening-step-title">{item.title}</span>
 					</button>
 				))}
-			</nav>
+			</nav>}
 
 			<div className="screening-workspace">
 				<section className="screening-panel" aria-live="polite">
-					<p className="reference-label">Step {String(step + 1).padStart(2, '0')} of 06</p>
-					<h2>{steps[step].title}</h2>
-					<p className="screening-step-description">{steps[step].description}</p>
+					<p className="reference-label">{consumerMode ? 'Consumer AI food check' : `Step ${String(step + 1).padStart(2, '0')} of 06`}</p>
+					<h2>{consumerMode
+						? step === 1 ? 'Select food' : step === 2 ? 'AI scan' : 'View result'
+						: steps[step].title}</h2>
+					<p className="screening-step-description">{consumerMode
+						? step === 1
+							? 'Take or upload a clear photo of the food you want the AI to review.'
+							: step === 2
+								? 'Ask the AI to look for visible features and mark areas to review.'
+								: 'The AI result is a preliminary visual observation, not a food-safety determination.'
+						: steps[step].description}</p>
 
 					{step === 0 && (
 						<div className="screening-fields">
@@ -278,6 +409,13 @@ export function DashboardPage() {
 								setCategory(event.target.value)
 								setFoodName('')
 								setFoodSearch('')
+								setPhoto(null)
+								setPhotoUrl('')
+								setDeviceReading('')
+								setTestCompleted(false)
+								setAnalysis(null)
+								setAnalysisError('')
+								invalidateSavedScreening()
 							}} value={category}>
 								<option value="">Select a category</option>
 								{Object.keys(foodCatalog).map((name) => <option key={name} value={name}>{name}</option>)}
@@ -291,6 +429,13 @@ export function DashboardPage() {
 								onChange={(event) => {
 									setFoodSearch(event.target.value)
 									setFoodName(event.target.value)
+									setPhoto(null)
+									setPhotoUrl('')
+									setDeviceReading('')
+									setTestCompleted(false)
+									setAnalysis(null)
+									setAnalysisError('')
+									invalidateSavedScreening()
 								}}
 								placeholder={category ? 'Search foods in this category' : 'Select a category first'}
 								value={foodSearch}
@@ -318,6 +463,13 @@ export function DashboardPage() {
 													onClick={() => {
 														setFoodName(food)
 														setFoodSearch(food)
+														setPhoto(null)
+														setPhotoUrl('')
+														setDeviceReading('')
+														setTestCompleted(false)
+														setAnalysis(null)
+														setAnalysisError('')
+														invalidateSavedScreening()
 													}}
 													type="button"
 												>
@@ -349,7 +501,7 @@ export function DashboardPage() {
 
 					{step === 1 && (
 						<div className="screening-fields">
-							<p className="selected-food"><strong>{foodName}</strong><span>{category}</span></p>
+							{!consumerMode && <p className="selected-food"><strong>{foodName}</strong><span>{category}</span></p>}
 							{cameraActive ? (
 								<div className="camera-capture">
 									<video aria-label="Live camera preview of food sample" autoPlay playsInline ref={videoRef} />
@@ -394,46 +546,151 @@ export function DashboardPage() {
 								</div>
 							)}
 							<div className="screening-actions">
-								<button className="screening-secondary" onClick={() => setStep(0)} type="button">Back</button>
-								<button className="screening-primary" disabled={!photo} onClick={() => goToStep(2)} type="button">
-									Continue to test <span aria-hidden="true">→</span>
+								{!consumerMode && <button className="screening-secondary" onClick={() => setStep(0)} type="button">Back</button>}
+								<button className="screening-primary" disabled={!photo} onClick={() => consumerMode ? setStep(2) : goToStep(2)} type="button">
+									{consumerMode ? 'Continue to AI scan' : 'Continue to test'} <span aria-hidden="true">→</span>
 								</button>
 							</div>
 						</div>
 					)}
 
 					{step === 2 && (
-						<div className="screening-fields">
-							<p className="selected-food"><strong>{foodName}</strong><span>{category}</span></p>
-							<p className="screening-privacy-note">When you request a visual review, this compressed photo is sent to FoodGuard&apos;s Gemini analysis service. Don&apos;t upload photos containing people or private information.</p>
-							<div className="screening-notice">
-								<strong>Portable device integration is not connected.</strong>
-								<p>If you have a FoodGuard device reading, you can note it here for this session. It will not be independently interpreted or saved.</p>
-							</div>
-							<label htmlFor="device-reading">Device reading <span>(optional)</span></label>
-							<textarea
-								id="device-reading"
-								maxLength={500}
-								onChange={(event) => setDeviceReading(event.target.value)}
-								placeholder="Enter the reading and units shown by your device"
-								rows="3"
-								value={deviceReading}
-							/>
-							<div className="screening-actions">
-								<button className="screening-secondary" onClick={() => setStep(1)} type="button">Back</button>
-								<button className="screening-primary" onClick={() => {
-									setTestCompleted(true)
-									setStep(3)
-								}} type="button">
-									Continue to analysis <span aria-hidden="true">→</span>
-								</button>
-							</div>
+						<div className={consumerMode ? 'consumer-ai-scan screening-result-state' : 'screening-fields'}>
+							{consumerMode ? (
+								<>
+									<div className="analysis-unavailable-icon" aria-hidden="true">AI</div>
+									<h3>Scan the photo with AI</h3>
+									<p>AI will look for visible warning signs, mark the areas it notices, and describe them. It cannot determine whether the food is good or bad to eat.</p>
+									{photoUrl && <img className="consumer-ai-scan-photo" src={photoUrl} alt="Food photo selected for AI visual review" />}
+									<p className="screening-privacy-note">The selected photo is sent to FoodGuard&apos;s AI analysis service for review. Avoid photos containing people or private information.</p>
+									{analysisError && <p className="auth-feedback auth-error" role="alert">{analysisError}</p>}
+									<button className="screening-primary" disabled={analysing || !photo} onClick={handleAnalyze} type="button">
+										{analysing ? 'AI is scanning the photo…' : 'Start AI scan'}
+									</button>
+								</>
+							) : (
+								<>
+									<p className="selected-food"><strong>{foodName}</strong><span>{category}</span></p>
+									<p className="screening-privacy-note">When you request a visual review, this compressed photo is sent to FoodGuard&apos;s Gemini analysis service. Don&apos;t upload photos containing people or private information.</p>
+									<div className="screening-notice">
+										<strong>Automatic device integration is not connected.</strong>
+										<p>Enter a reading manually if you have one. It will be saved with this screening when you choose Save screening.</p>
+									</div>
+									<label htmlFor="device-reading">Manual device reading <span>(optional)</span></label>
+									<textarea
+										id="device-reading"
+										maxLength={500}
+										onChange={(event) => {
+											setDeviceReading(event.target.value)
+											invalidateSavedScreening()
+										}}
+										placeholder="Enter the reading and units shown by your device"
+										rows="3"
+										value={deviceReading}
+									/>
+									<div className="screening-actions">
+										<button className="screening-secondary" onClick={() => setStep(1)} type="button">Back</button>
+										<button className="screening-primary" onClick={() => {
+											setTestCompleted(true)
+											setStep(3)
+										}} type="button">
+											Continue to analysis <span aria-hidden="true">→</span>
+										</button>
+									</div>
+								</>
+							)}
 						</div>
 					)}
 
 					{step === 3 && (
 						<div className="screening-result-state">
-							{analysing ? (
+							{consumerMode ? (
+								<>
+									{analysing ? (
+										<p className="analysis-loading" role="status">AI is reviewing visible features…</p>
+									) : analysis ? (
+										<div className="visual-analysis-result">
+											<p className="screening-result-label">AI visual observation · preliminary</p>
+											<h3>
+												{analysis.visibleCondition === 'possible_visual_issue'
+													? 'Possible visible concern'
+													: analysis.visibleCondition === 'no_obvious_visual_issue'
+														? 'No obvious visual issue detected'
+														: 'Appearance unclear'}
+											</h3>
+											<p className="visual-analysis-limit">{analysis.guidance}</p>
+											{photoUrl && (
+												<div className="consumer-risk-image-wrap">
+													<img className="consumer-risk-image" src={photoUrl} alt="Food photo with AI-identified visible areas marked" />
+													{analysis.riskAreas.map((area, index) => (
+														<span
+															aria-hidden="true"
+															className="consumer-risk-area"
+															key={`${area.x}-${area.y}-${index}`}
+															style={{
+																left: `${area.x / 10}%`,
+																top: `${area.y / 10}%`,
+																width: `${area.width / 10}%`,
+																height: `${area.height / 10}%`,
+															}}
+														>
+															<span>{index + 1}</span>
+														</span>
+													))}
+												</div>
+											)}
+											<h4 className="consumer-risk-heading">Visible areas to review</h4>
+											{analysis.riskAreas.length > 0 ? (
+												<ol className="consumer-risk-area-list">
+													{analysis.riskAreas.map((area, index) => <li key={`${index}-${area.observation}`}><span>{index + 1}</span>{area.observation}</li>)}
+												</ol>
+											) : (
+												<p className="consumer-risk-empty">No specific area was marked in this photo. That does not guarantee the food is safe.</p>
+											)}
+											{analysis.observations.length > 0 && (
+												<>
+													<h4 className="consumer-risk-heading">What the AI noticed</h4>
+													<ul className="visual-observations">
+														{analysis.observations.map((observation, index) => <li key={`${index}-${observation}`}>{observation}</li>)}
+													</ul>
+												</>
+											)}
+											<p className="visual-analysis-disclaimer">{analysis.disclaimer}</p>
+										</div>
+									) : (
+										<>
+											<div className="analysis-unavailable-icon" aria-hidden="true">AI</div>
+											<h3>Screen visible features</h3>
+											<p>This AI review can describe visible features only. It cannot verify hidden hazards or determine whether food is safe.</p>
+											{analysisError && <p className="auth-feedback auth-error" role="alert">{analysisError}</p>}
+											<button className="screening-primary" disabled={analysing} onClick={handleAnalyze} type="button">
+												{analysing ? 'Screening photo…' : 'Screen risk with AI'}
+											</button>
+										</>
+									)}
+									<button className="screening-secondary" disabled={analysing} onClick={() => {
+										setStep(1)
+										setAnalysis(null)
+										setAnalysisError('')
+									}} type="button">
+										{analysis ? 'Scan another food' : 'Choose another photo'}
+									</button>
+									{analysis?.visibleCondition === 'possible_visual_issue' && onReport && (
+										<div className="consumer-report-prompt" role="note">
+											<strong>The photo review noticed a visible feature that may need attention.</strong>
+											<p>You can report this product concern for follow-up. The AI has not tested for or confirmed pathogens, pesticide residues, or chemicals.</p>
+											<button className="screening-primary" onClick={() => onReport(analysis)} type="button">
+												Report this product concern
+											</button>
+										</div>
+									)}
+									{onSafety && (
+										<button className="screening-secondary" onClick={onSafety} type="button">
+											Access food-safety information
+										</button>
+									)}
+								</>
+							) : analysing ? (
 								<p className="analysis-loading" role="status">Reviewing visible appearance…</p>
 							) : analysis ? (
 								<div className="visual-analysis-result">
@@ -457,19 +714,19 @@ export function DashboardPage() {
 								<>
 									<div className="analysis-unavailable-icon" aria-hidden="true">AI</div>
 									<h3>Review visible appearance</h3>
-									<p>Gemini can point out visible features in this photo, such as discoloration or surface damage. It cannot detect bacteria, pesticide residues, toxins, or other hidden hazards, and its observations do not establish whether food is safe to eat.</p>
+									<p>AI can point out visible features in this photo, such as discoloration or surface damage. It cannot detect bacteria, pesticide residues, toxins, or other hidden hazards, and its observations do not establish whether food is safe to eat.</p>
 									{analysisError && <p className="auth-feedback auth-error" role="alert">{analysisError}</p>}
 									<button className="screening-primary" disabled={analysing} onClick={handleAnalyze} type="button">
 										{analysing ? 'Reviewing photo…' : 'Review photo with AI'}
 									</button>
 								</>
 							)}
-							<div className="screening-actions">
+							{!consumerMode && <div className="screening-actions">
 								<button className="screening-secondary" onClick={() => setStep(2)} type="button">Back</button>
 								<button className="screening-primary" disabled={!analysis || analysing} onClick={() => setStep(4)} type="button">
 									Continue to verification <span aria-hidden="true">→</span>
 								</button>
-							</div>
+							</div>}
 						</div>
 					)}
 
@@ -493,10 +750,20 @@ export function DashboardPage() {
 							<h3>Visual review only — Safety not determined</h3>
 							<p>{analysis?.guidance || 'No AI visual review was completed.'} AI photo review cannot establish whether this food is safe or unsafe.</p>
 							<ol>
-								<li>Keep the sample details and photo for your own records.</li>
+								<li>Food details, the manual reading, and visual observations can be saved to your FoodGuard account. The photo is not saved.</li>
 								<li>Contact an accredited laboratory or local food-safety authority for appropriate testing.</li>
 								<li>Follow official handling guidance while awaiting verified results.</li>
 							</ol>
+							{screeningSaved
+								? <p className="auth-feedback" role="status">Screening saved to your account.</p>
+								: (
+									<>
+										{screeningSaveError && <p className="auth-feedback auth-error" role="alert">{screeningSaveError}</p>}
+										<button className="screening-primary" disabled={savingScreening} onClick={handleSaveScreening} type="button">
+											{savingScreening ? 'Saving screening…' : 'Save screening'}
+										</button>
+									</>
+								)}
 							<button className="screening-secondary" onClick={() => {
 								setStep(0)
 								setCategory('')
@@ -507,6 +774,8 @@ export function DashboardPage() {
 								setTestCompleted(false)
 								setAnalysis(null)
 								setAnalysisError('')
+								setScreeningSaved(false)
+								setScreeningSaveError('')
 							}} type="button">Start a new screening</button>
 						</div>
 					)}
@@ -514,16 +783,30 @@ export function DashboardPage() {
 
 				<aside className="screening-sample-card">
 					<p className="reference-label">Current sample</p>
-					{photoUrl
-						? <img className="sample-thumbnail" src={photoUrl} alt={`Selected ${foodName} sample`} />
-						: <div className="sample-placeholder" aria-hidden="true"><span>F</span></div>}
-					<h3>{foodName || 'No food selected'}</h3>
-					<p>{category || 'Choose a food category to begin'}</p>
-					{deviceReading && <p className="sample-device-reading">Device note added</p>}
-					<div className="sample-safety-note">
-						<strong>Screening only</strong>
-						<span>This prototype does not determine whether food is safe to eat.</span>
-					</div>
+					{consumerMode
+						? <>
+							{photoUrl
+								? <img className="sample-thumbnail" src={photoUrl} alt="Selected food sample" />
+								: <div className="sample-placeholder" aria-hidden="true"><span>F</span></div>}
+							<h3>{photo ? 'Food photo selected' : 'No food selected'}</h3>
+							<p>{photo ? 'Ready for a visual review.' : 'Choose a food photo to begin.'}</p>
+							<div className="sample-safety-note">
+								<strong>Screening only</strong>
+								<span>This AI review cannot determine whether food is safe to eat.</span>
+							</div>
+						</>
+						: <>
+							{photoUrl
+								? <img className="sample-thumbnail" src={photoUrl} alt={`Selected ${foodName} sample`} />
+								: <div className="sample-placeholder" aria-hidden="true"><span>F</span></div>}
+							<h3>{foodName || 'No food selected'}</h3>
+							<p>{category || 'Choose a food category to begin'}</p>
+							{deviceReading && <p className="sample-device-reading">Manual device reading added</p>}
+							<div className="sample-safety-note">
+								<strong>Screening only</strong>
+								<span>This prototype does not determine whether food is safe to eat.</span>
+							</div>
+						</>}
 				</aside>
 			</div>
 		</section>
